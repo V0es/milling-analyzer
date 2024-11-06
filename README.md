@@ -6,12 +6,11 @@
 
 1. [Description](#description)
 2. [Installation](#installation)
-3. [Usage](#usage)
-4. [Examples](#examples)
-5. [Dependencies](#dependencies)
-6. [Support](#support)
-7. [Authors](#authors)
-8. [License](#license)
+3. [Example](#example)
+4. [Dependencies](#dependencies)
+5. [Support](#support)
+6. [Authors](#authors)
+7. [License](#license)
 
 ## Description
 
@@ -33,7 +32,7 @@ To activate the virtual environment and enter it, use the following command:
 ```bash
 poetry shell
 ```
-Usage
+## Example
 After installation, you can use Milling Analyzer for analysis and plotting graphs. Here’s an example:
 
 ```python
@@ -52,6 +51,10 @@ plt.figure()
 plt.contour(ss, dc, ei, [1], colors='k')
 plt.show()
 ```
+
+#### Output plot for example code from [main.py](main.py):
+![alt text](imgs/test_plot.png "Test plot")
+
 ## Dependencies
 This project requires the following libraries:
 
