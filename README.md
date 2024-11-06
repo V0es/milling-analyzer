@@ -52,8 +52,11 @@ plt.contour(ss, dc, ei, [1], colors='k')
 plt.show()
 ```
 
-#### Output plot for example code from [main.py](main.py):
-![alt text](imgs/test_plot.png "Test plot")
+#### Output plot for example code from [main.py](main.py) for different a/D ratios:
+![alt text](imgs/aD_1.png "a/D = 1")
+![alt text](imgs/aD_01.png "a/D = 0.1")
+![alt text](imgs/aD_05.png "a/D = 0.5")
+![alt text](imgs/aD_005.png "a/D = 0.05")
 
 ## Dependencies
 This project requires the following libraries:
