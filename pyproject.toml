@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "milling-analyzer"
+version = "0.1.0"
+description = ""
+authors = ["v0es <markkikov@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+matplotlib = "^3.9.2"
+scipy = "^1.14.1"
+numpy = "<2.1"
+numba = "^0.60.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
