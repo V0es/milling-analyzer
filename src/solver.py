@@ -3,10 +3,13 @@ from enum import Enum, StrEnum
 from typing import Callable, Tuple, List
 
 import numpy as np
+from numba import njit
+from numba.core.extending import register_jitable
 from numpy.linalg import inv, eigvals
 from scipy.linalg import expm
 
 from src.mill import Mill
+from .fast import npexpm
 
 class VariableName(StrEnum):
     """
@@ -52,6 +55,7 @@ class Solver:
         self.weight_b = weight_b
         if cutter_function:
             self.vec_cutter_func = np.vectorize(cutter_function)
+        self.h_i = None
         self.intervals_per_period = intervals_per_period
 
         self.D = np.zeros((self.intervals_per_period+2, self.intervals_per_period+2))
@@ -79,7 +83,7 @@ class Solver:
         dc = np.zeros((self.x_var.steps, self.y_var.steps))
         ei = np.zeros((self.x_var.steps, self.y_var.steps))
 
-        h_i = self.integrate_force_function()
+        self.h_i = self.integrate_force_function()
 
         D = np.zeros([self.intervals_per_period + 2, self.intervals_per_period + 2])
         d = np.ones([self.intervals_per_period + 1])
@@ -98,10 +102,10 @@ class Solver:
                 for i in range(self.intervals_per_period):
                     A = np.zeros([2, 2])
                     A[0, 1] = 1
-                    A[1, 0] = -self.mill_cutter.angular_natural_frequency ** 2 - h_i[i] * w / self.mill_cutter.modal_mass
+                    A[1, 0] = -self.mill_cutter.angular_natural_frequency ** 2 - self.h_i[i] * w / self.mill_cutter.modal_mass
                     A[1, 1] = -2 * self.mill_cutter.relative_damping * self.mill_cutter.angular_natural_frequency
                     B = np.zeros((2, 2))
-                    B[1, 0] = h_i[i] * w / self.mill_cutter.modal_mass
+                    B[1, 0] = self.h_i[i] * w / self.mill_cutter.modal_mass
                     P = expm(A * dt)
 
                     R = (expm(A * dt) - np.eye(2)).dot(inv(A).dot(B))
@@ -116,3 +120,60 @@ class Solver:
 
         return ss, dc, ei
 
+
+    def solve_jit(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ss = np.zeros((self.x_var.steps, self.y_var.steps))
+        dc = np.zeros((self.x_var.steps, self.y_var.steps))
+        ei = np.zeros((self.x_var.steps, self.y_var.steps))
+
+        self.h_i = self.integrate_force_function()
+
+        D = np.zeros([self.intervals_per_period + 2, self.intervals_per_period + 2])
+        d = np.ones([self.intervals_per_period + 1])
+        d[0:2] = 0
+        D += np.diag(d, -1)
+        D[2][0] = 1
+
+        for x in range(self.x_var.steps):
+            o = self.x_var.start_value + x * (self.x_var.final_value - self.x_var.start_value) / self.x_var.steps
+            tau = 60 / (o * self.mill_cutter.teeth_num)
+            dt = tau / self.intervals_per_period
+
+            for y in range(self.y_var.steps):
+                w = self.y_var.start_value + y * (self.y_var.final_value - self.y_var.start_value) / self.y_var.steps
+                Fi = self.monodromy_matrix(
+                    self.intervals_per_period,
+                    self.mill_cutter.angular_natural_frequency,
+                    self.h_i,
+                    self.mill_cutter.modal_mass,
+                    w,
+                    dt,
+                    D,
+                    self.mill_cutter.relative_damping)
+                ss[x, y] = o
+                dc[x, y] = w
+                ei[x, y] = max(abs(eigvals(Fi)))
+            print(self.x_var.steps + 1 - x)
+
+        return ss, dc, ei
+
+    @staticmethod
+    @njit
+    def monodromy_matrix(intervals_per_period, angular_natural_frequency, h_i, modal_mass, w, dt, D, relative_damping):
+        D = D.astype(np.complex128)
+        Fi = np.eye(intervals_per_period + 2, dtype=np.complex128)
+        for i in range(intervals_per_period):
+            A = np.zeros((2, 2), dtype=np.complex128)
+            A[0, 1] = 1
+            A[1, 0] = -angular_natural_frequency ** 2 - h_i[i] * w / modal_mass
+            A[1, 1] = -2 * relative_damping * angular_natural_frequency
+            B = np.zeros((2, 2), dtype=np.complex128)
+            B[1, 0] = h_i[i] * w / modal_mass
+            P = npexpm(A * dt)
+
+            R = (npexpm(A * dt) - np.eye(2)).dot(inv(A).dot(B))
+            D[:2, :2] = P
+            D[:2, intervals_per_period] = 0.5 * R[:, 0]
+            D[0:2, intervals_per_period + 1] = 0.5 * R[:, 0]
+            Fi = np.dot(D, Fi)
+        return Fi
