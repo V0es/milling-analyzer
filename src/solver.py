@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import Callable, Tuple, List
-
+import time
 import numpy as np
 from numba import njit
 from numba.core.extending import register_jitable
@@ -66,8 +66,8 @@ class Solver:
 
     def integrate_force_function(self) -> np.ndarray:
         h_i = np.zeros(self.intervals_per_period)
+        dtr = 2 * np.pi / (self.mill_cutter.teeth_num * self.intervals_per_period)
         for i in range(self.intervals_per_period):
-            dtr = 2 * np.pi / (self.mill_cutter.teeth_num * self.intervals_per_period)
             for j in range(self.mill_cutter.teeth_num):
                 for h in range(self.integration_steps):
                     fi = i * dtr + j * 2 * np.pi / self.mill_cutter.teeth_num + h * dtr / self.integration_steps
@@ -106,9 +106,9 @@ class Solver:
                     A[1, 1] = -2 * self.mill_cutter.relative_damping * self.mill_cutter.angular_natural_frequency
                     B = np.zeros((2, 2))
                     B[1, 0] = self.h_i[i] * w / self.mill_cutter.modal_mass
-                    P = expm(A * dt)
+                    P = npexpm(A * dt)
 
-                    R = (expm(A * dt) - np.eye(2)).dot(inv(A).dot(B))
+                    R = (npexpm(A * dt) - np.eye(2)).dot(inv(A).dot(B))
                     D[:2, :2] = P
                     D[:2, self.intervals_per_period] = self.weight_a * R[:, 0]
                     D[0:2, self.intervals_per_period + 1] = self.weight_b * R[:, 0]
@@ -119,6 +119,7 @@ class Solver:
             print(self.x_var.steps + 1 - x)
 
         return ss, dc, ei
+
 
 
     def solve_jit(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -133,6 +134,8 @@ class Solver:
         d[0:2] = 0
         D += np.diag(d, -1)
         D[2][0] = 1
+
+        start = time.time()
 
         for x in range(self.x_var.steps):
             o = self.x_var.start_value + x * (self.x_var.final_value - self.x_var.start_value) / self.x_var.steps
@@ -150,10 +153,13 @@ class Solver:
                     dt,
                     D,
                     self.mill_cutter.relative_damping)
+
                 ss[x, y] = o
                 dc[x, y] = w
                 ei[x, y] = max(abs(eigvals(Fi)))
             print(self.x_var.steps + 1 - x)
+        end = time.time()
+        print(f'dt = {end - start}')
 
         return ss, dc, ei
 
