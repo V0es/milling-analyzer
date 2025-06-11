@@ -7,6 +7,7 @@ from numba import njit
 from numba.core.extending import register_jitable
 from numpy.linalg import inv, eigvals
 from scipy.linalg import expm
+from tqdm import tqdm
 
 from src.mill import Mill
 from .fast import npexpm
@@ -15,7 +16,7 @@ class VariableName(StrEnum):
     """
     Enum class for variable parameters
     """
-    SPINDLE_SPEED = 'Spindel Speeds, m'
+    SPINDLE_SPEED = 'Spindle Speeds, m'
     ANGULAR_NATURAL_FREQUENCY = 'Natural Frequencies, rad/s'
     DEPTH_OF_CUT = 'Depths Of Cut, m'
     MODAL_MASS = 'Modal Masses, kg'
@@ -79,9 +80,11 @@ class Solver:
 
     def solve(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
-        ss = np.zeros((self.x_var.steps, self.y_var.steps))
-        dc = np.zeros((self.x_var.steps, self.y_var.steps))
-        ei = np.zeros((self.x_var.steps, self.y_var.steps))
+        ss = np.linspace(self.x_var.start_value, self.x_var.final_value, self.x_var.steps)
+        dc = np.linspace(self.y_var.final_value, self.y_var.start_value, self.y_var.steps)
+        ei = np.zeros((self.y_var.steps, self.x_var.steps))
+
+        SS, DC = np.meshgrid(ss, dc)
 
         self.h_i = self.integrate_force_function()
 
@@ -91,13 +94,13 @@ class Solver:
         D += np.diag(d, -1)
         D[2][0] = 1
 
-        for x in range(self.x_var.steps):
-            o = self.x_var.start_value + x * (self.x_var.final_value - self.x_var.start_value) / self.x_var.steps
+        for x in tqdm(range(self.x_var.steps)):
+            o = ss[x]
             tau = 60 / (o * self.mill_cutter.teeth_num)
             dt = tau / self.intervals_per_period
 
-            for y in range(self.y_var.steps):
-                w = self.y_var.start_value + y * (self.y_var.final_value - self.y_var.start_value) / self.y_var.steps
+            for y in tqdm(range(self.y_var.steps)):
+                w = dc[y]
                 Fi = np.eye(self.intervals_per_period + 2)
                 for i in range(self.intervals_per_period):
                     A = np.zeros([2, 2])
@@ -113,13 +116,54 @@ class Solver:
                     D[:2, self.intervals_per_period] = self.weight_a * R[:, 0]
                     D[0:2, self.intervals_per_period + 1] = self.weight_b * R[:, 0]
                     Fi = np.dot(D, Fi)
-                ss[x, y] = o
-                dc[x, y] = w
-                ei[x, y] = max(abs(eigvals(Fi)))
+                # ss[x, y] = o
+                # dc[x, y] = w
+                ei[y, x] = max(abs(eigvals(Fi)))
             print(self.x_var.steps + 1 - x)
 
-        return ss, dc, ei
+        return SS, DC, ei
 
+    def solve_jit_test(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ss = np.linspace(self.x_var.start_value, self.x_var.final_value, self.x_var.steps)
+        dc = np.linspace(self.y_var.final_value, self.y_var.start_value, self.y_var.steps)
+        ei = np.zeros((self.y_var.steps, self.x_var.steps))
+
+        SS, DC = np.meshgrid(ss, dc)
+
+        self.h_i = self.integrate_force_function()
+
+        D = np.zeros([self.intervals_per_period + 2, self.intervals_per_period + 2])
+        d = np.ones([self.intervals_per_period + 1])
+        d[0:2] = 0
+        D += np.diag(d, -1)
+        D[2][0] = 1
+
+        start = time.time()
+
+        for x in range(self.x_var.steps):
+            o = ss[x]
+            tau = 60 / (o * self.mill_cutter.teeth_num)
+            dt = tau / self.intervals_per_period
+
+            for y in range(self.y_var.steps):
+                w = dc[y]
+                Fi = self.monodromy_matrix(
+                    self.intervals_per_period,
+                    self.mill_cutter.angular_natural_frequency,
+                    self.h_i,
+                    self.mill_cutter.modal_mass,
+                    w,
+                    dt,
+                    D,
+                    self.mill_cutter.relative_damping)
+
+                # ss[x, y] = o
+                # dc[x, y] = w
+                ei[y, x] = max(abs(eigvals(Fi)))
+            print(self.x_var.steps + 1 - x)
+        end = time.time()
+        print(f'dt = {end - start}')
+        return SS, DC, ei
 
 
     def solve_jit(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -160,7 +204,6 @@ class Solver:
             print(self.x_var.steps + 1 - x)
         end = time.time()
         print(f'dt = {end - start}')
-
         return ss, dc, ei
 
     @staticmethod

@@ -42,7 +42,7 @@ class Mill:
             self.exit_angle = np.pi
         else:
             self.start_angle = 0
-            self.exit_angle = np.arccos(2 * aD - 1)
+            self.exit_angle = np.arccos(1 - 2 * aD)
 
         self.initialize_tooth()
 

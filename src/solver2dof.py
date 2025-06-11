@@ -1,0 +1,289 @@
+from dataclasses import dataclass
+from enum import Enum, StrEnum
+from typing import Callable, Tuple, List
+import time
+import numpy as np
+from numba import njit
+from numba.core.extending import register_jitable
+from numpy.linalg import inv, eigvals
+from scipy.linalg import expm
+from tqdm import tqdm
+
+from src.mill import Mill
+from .fast import npexpm
+
+class VariableName(StrEnum):
+    """
+    Enum class for variable parameters
+    """
+    SPINDLE_SPEED = 'Spindle Speeds, m'
+    ANGULAR_NATURAL_FREQUENCY = 'Natural Frequencies, rad/s'
+    DEPTH_OF_CUT = 'Depths Of Cut, m'
+    MODAL_MASS = 'Modal Masses, kg'
+
+
+@dataclass
+class Varying:
+    """
+    Dataclass to hold information about name of variable and calculating parameters
+    """
+    var_name: str
+    start_value: float
+    final_value: float
+    steps: int
+
+
+class Solver2DOF:
+    def __init__(
+            self,
+            mill: Mill,
+            x_variable: Varying,
+            y_variable: Varying,
+            cutter_function: Callable = None,
+            intervals_per_period: int = 40,
+            integration_steps: int = 20,
+            weight_a: float = 0.5,
+            weight_b: float = 0.5,
+
+
+    ):
+        self.x_var = x_variable
+        self.y_var = y_variable
+        self.mill_cutter = mill
+
+        self.integration_steps = integration_steps
+        self.weight_a = weight_a
+        self.weight_b = weight_b
+        if cutter_function:
+            self.vec_cutter_func = np.vectorize(cutter_function)
+        self.h_xx = self.h_xy = self.h_yx = self.h_yy = None
+        self.intervals_per_period = intervals_per_period
+
+        self.D = np.zeros((2*self.intervals_per_period+4, 2*self.intervals_per_period+4))
+        self.d = np.ones(2*self.intervals_per_period + 2)
+        self.d[:4] = 0
+        self.D += np.diag(self.d, -2)
+        self.D[4, 0] = 1
+        self.D[5, 1] = 1
+
+    def set_mill(self, new_mill: Mill):
+        self.mill_cutter = new_mill
+
+    def integrate_force_function(self) -> Tuple[np.ndarray]:
+        h_xx = np.zeros(self.intervals_per_period)
+        h_xy = np.zeros(self.intervals_per_period)
+        h_yx = np.zeros(self.intervals_per_period)
+        h_yy = np.zeros(self.intervals_per_period)
+        dtr = 2 * np.pi / (self.mill_cutter.teeth_num * self.intervals_per_period)
+        for i in range(self.intervals_per_period):
+            for j in range(self.mill_cutter.teeth_num):
+                for h in range(self.integration_steps):
+                    fi = i * dtr + j * 2 * np.pi / self.mill_cutter.teeth_num + h * dtr / self.integration_steps
+                    h_xx[i] +=\
+                        (self.mill_cutter.tooth_in_cut(fi) *
+                         (self.mill_cutter.tangential_force_coeff * np.cos(fi) +
+                          self.mill_cutter.normal_force_coeff * np.sin(fi)) * np.sin(fi) / self.integration_steps)
+                    h_xy[i] +=\
+                        (self.mill_cutter.tooth_in_cut(fi) *
+                         (self.mill_cutter.tangential_force_coeff * np.cos(fi) +
+                          self.mill_cutter.normal_force_coeff * np.sin(fi)) * np.cos(fi) / self.integration_steps)
+                    h_yx[i] +=\
+                        (self.mill_cutter.tooth_in_cut(fi) *
+                         (-self.mill_cutter.tangential_force_coeff * np.sin(fi) +
+                          self.mill_cutter.normal_force_coeff * np.cos(fi)) * np.sin(fi) / self.integration_steps)
+                    h_yy[i] +=\
+                        (self.mill_cutter.tooth_in_cut(fi) *
+                         (-self.mill_cutter.tangential_force_coeff * np.sin(fi) +
+                          self.mill_cutter.normal_force_coeff * np.cos(fi)) * np.cos(fi) / self.integration_steps)
+        return [h_xx, h_xy, h_yx, h_yy]
+
+    # def solve(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    #
+    #     ss = np.linspace(self.x_var.start_value, self.x_var.final_value, self.x_var.steps)
+    #     dc = np.linspace(self.y_var.final_value, self.y_var.start_value, self.y_var.steps)
+    #     ei = np.zeros((self.y_var.steps, self.x_var.steps))
+    #
+    #     SS, DC = np.meshgrid(ss, dc)
+    #
+    #     h = self.integrate_force_function()
+    #     self.h_xx = h[0]
+    #     self.h_xy = h[1]
+    #     self.h_yx = h[2]
+    #     self.h_yy = h[3]
+    #
+    #     D = np.zeros([self.intervals_per_period + 2, self.intervals_per_period + 2])
+    #     d = np.ones([self.intervals_per_period + 1])
+    #     d[0:2] = 0
+    #     D += np.diag(d, -1)
+    #     D[2][0] = 1
+    #
+    #     for x in tqdm(range(self.x_var.steps)):
+    #         o = ss[x]
+    #         tau = 60 / (o * self.mill_cutter.teeth_num)
+    #         dt = tau / self.intervals_per_period
+    #
+    #         for y in range(self.y_var.steps):
+    #             w = dc[y]
+    #             Fi = np.eye(self.intervals_per_period + 2)
+    #             for i in range(self.intervals_per_period):
+    #                 A = np.zeros([2, 2])
+    #                 A[0, 1] = 1
+    #                 A[1, 0] = -self.mill_cutter.angular_natural_frequency ** 2 - self.h_i[i] * w / self.mill_cutter.modal_mass
+    #                 A[1, 1] = -2 * self.mill_cutter.relative_damping * self.mill_cutter.angular_natural_frequency
+    #                 B = np.zeros((2, 2))
+    #                 B[1, 0] = self.h_i[i] * w / self.mill_cutter.modal_mass
+    #                 P = npexpm(A * dt)
+    #
+    #                 R = (npexpm(A * dt) - np.eye(2)).dot(inv(A).dot(B))
+    #                 D[:2, :2] = P
+    #                 D[:2, self.intervals_per_period] = self.weight_a * R[:, 0]
+    #                 D[0:2, self.intervals_per_period + 1] = self.weight_b * R[:, 0]
+    #                 Fi = np.dot(D, Fi)
+    #             # ss[x, y] = o
+    #             # dc[x, y] = w
+    #             ei[y, x] = max(abs(eigvals(Fi)))
+    #         print(self.x_var.steps + 1 - x)
+    #
+    #     return SS, DC, ei
+
+    def solve_jit_test(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ss = np.linspace(self.x_var.start_value, self.x_var.final_value, self.x_var.steps)
+        dc = np.linspace(self.y_var.final_value, self.y_var.start_value, self.y_var.steps)
+        ei = np.zeros((self.y_var.steps, self.x_var.steps))
+
+        SS, DC = np.meshgrid(ss, dc)
+
+        h = self.integrate_force_function()
+        self.h_xx = h[0]
+        self.h_xy = h[1]
+        self.h_yx = h[2]
+        self.h_yy = h[3]
+
+        start = time.time()
+
+        for x in tqdm(range(self.x_var.steps)):
+            o = ss[x]
+            tau = 60 / (o * self.mill_cutter.teeth_num)
+            dt = tau / self.intervals_per_period
+
+            for y in range(self.y_var.steps):
+                w = dc[y]
+                Fi = self.monodromy_matrix(
+                    self.intervals_per_period,
+                    self.mill_cutter.angular_natural_frequency,
+                    self.mill_cutter.angular_natural_frequency,
+                    self.h_xx,
+                    self.h_xy,
+                    self.h_yx,
+                    self.h_yy,
+                    self.mill_cutter.modal_mass,
+                    self.mill_cutter.modal_mass,
+                    w,
+                    dt,
+                    self.D,
+                    self.mill_cutter.relative_damping,
+                    self.mill_cutter.relative_damping
+                )
+
+                # ss[x, y] = o
+                # dc[x, y] = w
+                ei[y, x] = max(abs(eigvals(Fi)))
+            # print(self.x_var.steps + 1 - x)
+        end = time.time()
+        # print(f'dt = {end - start}')
+        return SS, DC, ei
+
+
+    def solve_jit(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ss = np.zeros((self.x_var.steps, self.y_var.steps))
+        dc = np.zeros((self.x_var.steps, self.y_var.steps))
+        ei = np.zeros((self.x_var.steps, self.y_var.steps))
+
+        self.h_xx, self.h_xy, self.h_yx, self.h_yy = self.integrate_force_function()
+
+        D = np.zeros([self.intervals_per_period + 2, self.intervals_per_period + 2])
+        d = np.ones([self.intervals_per_period + 1])
+        d[0:2] = 0
+        D += np.diag(d, -1)
+        D[2][0] = 1
+
+        start = time.time()
+
+        for x in range(self.x_var.steps):
+            o = self.x_var.start_value + x * (self.x_var.final_value - self.x_var.start_value) / self.x_var.steps
+            tau = 60 / (o * self.mill_cutter.teeth_num)
+            dt = tau / self.intervals_per_period
+
+            for y in range(self.y_var.steps):
+                w = self.y_var.start_value + y * (self.y_var.final_value - self.y_var.start_value) / self.y_var.steps
+                Fi = self.monodromy_matrix(
+                    self.intervals_per_period,
+                    self.mill_cutter.angular_natural_frequency,
+                    self.mill_cutter.angular_natural_frequency,
+                    self.h_xx,
+                    self.h_xy,
+                    self.h_yx,
+                    self.h_yy,
+                    self.mill_cutter.modal_mass,
+                    self.mill_cutter.modal_mass,
+                    w,
+                    dt,
+                    D,
+                    self.mill_cutter.relative_damping,
+                    self.mill_cutter.relative_damping
+                )
+
+                ss[x, y] = o
+                dc[x, y] = w
+                ei[x, y] = max(abs(eigvals(Fi)))
+            print(self.x_var.steps + 1 - x)
+        end = time.time()
+        print(f'dt = {end - start}')
+        return ss, dc, ei
+
+    @staticmethod
+    @njit
+    def monodromy_matrix(
+            intervals_per_period,
+            w0x,
+            w0y,
+            h_xx,
+            h_xy,
+            h_yx,
+            h_yy,
+            modal_mass_x,
+            modal_mass_y,
+            w,
+            dt,
+            D,
+            zeta_x,
+            zeta_y):
+        D = D.astype(np.complex128)
+        Fi = np.eye(2*intervals_per_period + 4, dtype=np.complex128)
+        for i in range(intervals_per_period):
+            A = np.zeros((4, 4), dtype=np.complex128)
+            A[0, 2] = 1
+            A[1, 3] = 1
+            A[2, 0] = -w0x ** 2 - h_xx[i] * w / modal_mass_x
+            A[2, 1] = -h_xy[i] * w / modal_mass_x
+            A[2, 2] = -2 * zeta_x * w0x
+            A[3, 0] = -h_yx[i] * w / modal_mass_y
+            A[3, 1] = -w0y ** 2 - h_yy[i] * w / modal_mass_y
+            A[3, 3] = -2 * zeta_y * w0y
+
+            B = np.zeros((4, 4), dtype=np.complex128)
+            B[2, 0] = h_xx[i] * w / modal_mass_x
+            B[2, 1] = h_xy[i] * w / modal_mass_x
+            B[3, 0] = h_yx[i] * w / modal_mass_y
+            B[3, 1] = h_yy[i] * w / modal_mass_y
+
+            P = npexpm(A * dt)
+
+            R = (npexpm(A * dt) - np.eye(4)) @ inv(A) @ B
+
+            D[:4, :4] = P
+            D[:4, 2 * intervals_per_period:2 * intervals_per_period + 2] = 0.5 * R[:4, :2]
+            D[:4, 2 * intervals_per_period + 2:2 * intervals_per_period + 4] = 0.5 * R[:4, :2]
+
+            Fi = np.dot(D, Fi)
+        return Fi
